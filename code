@@ -1,1 +1,224 @@
+import cv2
+import os
+import time
+import numpy as np
+import pandas as pd
+from matplotlib import pyplot as plt
+import thingspeak
+
+def get_classification(area):
+    area = round(area, 1)
+    to_ret = ""
+    if 0 < area < 60:
+        to_ret = "Small rice grain"
+    elif 60 <= area < 120:
+        to_ret = "Medium rice grain"
+    elif area >= 120:
+        to_ret = "Large rice grain"
+    to_ret = "(" + to_ret + ")"
+    return to_ret
+
+def classify_rice(contour):
+    epsilon = 0.05 * cv2.arcLength(contour, True)
+    smoothed_contour = cv2.approxPolyDP(contour, epsilon, True)
+
+    if len(smoothed_contour) >= 5:
+        ellipse = cv2.fitEllipse(smoothed_contour)
+        (x, y), (major_axis, minor_axis), angle = ellipse
+        aspect_ratio = major_axis / minor_axis
+
+        aspect_ratio_threshold = 2.0
+
+        contour_moments = cv2.moments(contour)
+        if contour_moments["m00"] != 0:
+            cx = int(contour_moments["m10"] / contour_moments["m00"])
+            cy = int(contour_moments["m01"] / contour_moments["m00"])
+            hull = cv2.convexHull(contour, returnPoints=False)
+            defects = cv2.convexityDefects(contour, hull)
+            num_defects = 0 if defects is None else defects.shape[0]
+
+            if aspect_ratio < aspect_ratio_threshold and num_defects <= 2:
+                return "Perfect Rice"
+            else:
+                return "Broken Rice"
+        else:
+            return "Not enough information to classify"
+    else:
+        return "Not enough points to fit an ellipse"
+
+def save_figures(output_path="captured_images/", img_counter=None, prefix=""):
+    # Save figures under the same folder
+    if img_counter is not None:
+        plt.savefig(f"{output_path}{prefix}_{img_counter}.png", bbox_inches='tight', pad_inches=0.1)
+    else:
+        plt.savefig(f"{output_path}{prefix}.png", bbox_inches='tight', pad_inches=0.1)
+    plt.close('all')
+
+# Initialize the camera
+cam = cv2.VideoCapture(0)
+
+cv2.namedWindow("Camera and Processing App")
+img_counter = 0
+
+# Set the capture interval to 2 seconds
+capture_interval = 4  # in seconds
+
+# ThingSpeak channel details
+channel_id = 2490428
+write_key = 'O3EG1XIJR17S8SD0'
+
+# Initialize ThingSpeak client
+client = thingspeak.Channel(channel_id, write_key)
+
+while True:
+    start_time = time.time()
+
+    # Capture an image every 2 seconds
+    while time.time() - start_time < capture_interval:
+        ret, frame = cam.read()
+
+        if not ret:
+            print("Failed to grab frame")
+            break
+
+        cv2.imshow("Camera Feed", frame)
+
+        if cv2.waitKey(1) & 0xFF == 27:
+            print("Escape hit, closing the app")
+            cam.release()
+            cv2.destroyAllWindows()
+            exit()
+
+        time.sleep(0.1)
+
+    # Check if escape was pressed
+    if cv2.waitKey(1) & 0xFF == 27:
+        print("Escape hit, closing the app")
+        cam.release()
+        cv2.destroyAllWindows()
+        break
+
+    # Save the captured image
+    image_name = f"captured_images/captured_image_{img_counter + 1}.png"
+    cv2.imwrite(image_name, frame)
+    print(f"Image {img_counter + 1} captured and saved as {image_name}")
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    histogram = cv2.calcHist([gray], [0], None, [256], [0, 256])
+
+    plt.figure(figsize=(6, 4))
+    plt.bar(np.arange(len(histogram)), histogram.flatten(), color='blue', alpha=0.7)
+    plt.xlabel('Pixel Intensity')
+    plt.ylabel('Number of pixels')
+    plt.title('Histogram of Grayscale Image')
+    plt.grid(axis='y', alpha=0.7)
+    save_figures("captured_images/", img_counter + 1, prefix="histogram")
+
+    canny = cv2.Canny(gray, 30, 150, 3)
+    dilated = cv2.dilate(canny, (1, 1), iterations=2)
+
+    (cnt, _) = cv2.findContours(dilated.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    min_contour_area = 20
+    max_contour_area = 800
+    filtered_contours = [contour for contour in cnt if min_contour_area < cv2.contourArea(contour) < max_contour_area]
+
+    result_image = frame.copy()
+    all_areas = []
+    broken_rice_count = 0
+
+    for contour in filtered_contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        area = cv2.contourArea(contour)
+        all_areas.append(area)
+
+        if 0 < area < 60:
+            cv2.rectangle(result_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        elif 60 <= area < 120:
+            cv2.rectangle(result_image, (x, y), (x + w, y + h), (255, 0, 0), 2)
+        elif area >= 120:
+            cv2.rectangle(result_image, (x, y), (x + w, y + h), (0, 0, 255), 2)
+
+        ellipse = cv2.fitEllipse(contour)
+        cv2.ellipse(result_image, ellipse, (50, 50, 50), 2)
+
+        classification = classify_rice(contour)
+        print("Area:", round(area, 2), get_classification(area), classification)
+
+        if classification == "Broken Rice":
+            broken_rice_count += 1
+
+    total_rice_count = len(filtered_contours)
+    print('Rice grains in the image:', total_rice_count)
+    print('Broken rice grains in the image:', broken_rice_count)
+
+    percentage_broken_rice = (broken_rice_count / total_rice_count) * 100
+    print('Ratio of Broken Rice to Total Rice:', round(percentage_broken_rice, 2), '%')
+
+    # Determine quality based on the percentage of broken rice
+    if percentage_broken_rice >= 50:
+        quality = "Poor Quality Rice"
+    elif 30 <= percentage_broken_rice < 50:
+        quality = "Medium Quality Rice"
+    else:
+        quality = "Good Quality Rice"
+
+    print(quality)
+
+    # Calculate average area
+    if all_areas:
+        average_area = sum(all_areas) / len(all_areas)
+        print("Average Rice Grain Area:", round(average_area, 2), get_classification(average_area))
+    else:
+        print("No rice grains found in the image.")
+
+    # Display images
+    plt.figure(figsize=(12, 6))
+
+    plt.subplot(231), plt.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)), plt.title('Original')
+    plt.subplot(232), plt.imshow(gray, cmap='gray'), plt.title('Grayscale')
+    plt.subplot(233), plt.imshow(canny, cmap='gray'), plt.title('Canny Edge Detection')
+    plt.subplot(234), plt.imshow(dilated, cmap='gray'), plt.title('Dilated Edges')
+    plt.subplot(235), plt.imshow(cv2.cvtColor(result_image, cv2.COLOR_BGR2RGB)), plt.title('Contours')
+
+    # Save figures under the same folder
+    save_figures("captured_images/", img_counter + 1, prefix="plot")
+
+    try:
+        response = client.update({
+            'field1': total_rice_count,
+            'field2': broken_rice_count,
+            'field3': percentage_broken_rice,
+            'field4':  average_area,
+        })
+        print("Data sent to ThingSpeak successfully.")
+    except Exception as e:
+        print("Error sending data to ThingSpeak:", e)
+
+    if 'results_df' not in locals():
+        results_df = pd.DataFrame(
+            columns=["Total Rice Grains", "Broken Rice Grains", "Percentage Broken Rice", "Quality",
+                     "Average Rice Grain Area"])
+
+    new_data = pd.DataFrame({
+        'Total Rice Grains': [total_rice_count],
+        'Broken Rice Grains': [broken_rice_count],
+        'Percentage Broken Rice': [percentage_broken_rice],
+        'Average Rice Grain Area': [average_area],
+    })
+
+    results_df = results_df.dropna(axis=1, how='all')
+    results_df = pd.concat([results_df, new_data], ignore_index=True)
+
+    output_folder = "rice_grains_results/"
+    os.makedirs(output_folder, exist_ok=True)
+    results_path = os.path.join(output_folder, "rice_grains_results.csv")
+    results_df.to_csv(results_path, index=False)
+
+    print(f"Results saved at: {results_path}")
+
+    img_counter += 1
+
+cam.release()
+cv2.destroyAllWindows()
 
