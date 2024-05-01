@@ -1,0 +1,18 @@
+import RPi.GPIO as GPIO
+import time
+
+GPIO.setmode(GPIO.BCM)
+
+relay_pin = 21
+
+GPIO.setup(relay_pin, GPIO.OUT)
+
+try:
+    while True:
+        GPIO.output(relay_pin, GPIO.HIGH)
+        time.sleep(3)
+        GPIO.output(relay_pin, GPIO.LOW)
+        time.sleep(1)
+
+except KeyboardInterrupt:
+    GPIO.cleanup()
